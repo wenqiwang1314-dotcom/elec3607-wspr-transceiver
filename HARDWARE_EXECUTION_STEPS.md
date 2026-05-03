@@ -59,6 +59,205 @@ SMA / RFIN -> BPFIN -> BPF -> BPFOUT -> receiver amplifier/mixer
 - 你能指着图解释 RX 信号从 SMA 到 mixer 的路径。
 - 你能说出 TX 新电路要插入在哪里。
 
+## 1A. 根据 `BBBSchematic.jpg` 精确确定硬件架构
+
+这张图不是只用来看元件名，而是用来决定 transceiver 的切入点。先按下面顺序把原板分成 6 个功能块。
+
+### 1A.1 原接收机 RF 路径
+
+从 `BBBSchematic.jpg` 可以读出原接收链：
+
+```text
+U6 SMA connector
+ -> BPFIN
+ -> Band Pass Filter
+    R20, C20-C32, J4/J5/J6 external inductors, R21
+ -> BPFOUT / RFIN
+ -> C2 AC coupling
+ -> U1 THS4304 RF amplifier
+ -> RFOUT
+ -> U3 TS3A5017 Tayloe / quadrature mixer
+ -> MIXI+, MIXI-, MIXQ+, MIXQ-
+ -> U4 TL972 audio amplifier
+ -> J3 audio jack, Iout/Qout
+```
+
+这说明原板真正的 RF input/output 关系是：
+
+| 位置 | 图中标号 | 硬件含义 |
+|---|---|---|
+| RF connector | `U6` | SMA 接口，当前只作为接收输入。 |
+| BPF input | `BPFIN` | SMA 后进入 bandpass filter 的一端。 |
+| BPF output | `BPFOUT` | bandpass filter 输出端。 |
+| RX amplifier input | `RFIN` / `RFIN_TP7` | 与 `BPFOUT` 同一输入区域，经 `C2` 进入 U1。 |
+| RX amplifier output | `RFOUT` / `RFOUT_TP8` | U1 输出，送入 mixer。 |
+| Mixer input | `MIXIN` | U3 TS3A5017 的 RF mixer input。 |
+
+结论：Part B 不应该把 PA 接到 `RFOUT`。`RFOUT` 是接收机 RF amplifier 的输出，不是天线输出。TX power path 应围绕 `CLK2`、`BPFOUT/BPFIN` 和 SMA 重新设计。
+
+### 1A.2 原时钟和可用 TX 源
+
+图中 `U2 Si5351A-B-GT` 有 3 个输出：
+
+| Si5351 输出 | 原用途 | 新设计动作 |
+|---|---|---|
+| `CLK0` | 送 mixer 的 0 度 LO，标成 `MIXCLK0` | 保留，不改。 |
+| `CLK1` | 送 mixer 的 90 度 LO，标成 `MIXCLK90` | 保留，不改。 |
+| `CLK2` | 已引出但未用于 RX 主链 | 作为 WSPR TX RF source。 |
+
+结论：TX 链从 `CLK2` 开始，不能占用 `CLK0/CLK1`，否则会破坏接收机 mixer。
+
+### 1A.3 最推荐的 Part B 架构
+
+为了最少改动原接收机，同时满足“发射机与接收机共用 bandpass filter”，推荐架构如下：
+
+```text
+RX mode:
+SMA U6
+ -> BPFIN
+ -> shared BPF
+ -> BPFOUT
+ -> T/R switch RX throw
+ -> RFIN / C2
+ -> U1 THS4304
+ -> RFOUT
+ -> U3 mixer
+ -> I/Q audio
+
+TX mode:
+Si5351 CLK2
+ -> DC block / attenuator
+ -> TX driver
+ -> PA final
+ -> PA output matching / optional LPF
+ -> T/R switch TX throw
+ -> BPFOUT
+ -> shared BPF used in reverse direction
+ -> BPFIN
+ -> SMA U6
+ -> 50 ohm load
+```
+
+这个方案的核心切入点是 `BPFOUT/RFIN`：
+
+- `BPFOUT` 是 BPF 和 receiver amplifier 之间的天然分界点。
+- 在 RX 模式，`BPFOUT` 接回 `RFIN/C2/U1`，原接收机照常工作。
+- 在 TX 模式，`BPFOUT` 从 receiver input 断开，改接 PA output，让 TX 信号反向通过同一个 BPF 到 SMA。
+- BPF 是 LC 被动网络，理论上双向可用；但原板的 50 ohm 电阻和实际插损必须测量/计算。
+
+### 1A.4 为什么不从其他位置接入
+
+不要选择这些错误切入点：
+
+| 错误切入点 | 问题 |
+|---|---|
+| `RFOUT` | 这是 U1 接收放大器输出，会把 TX 功率打进 mixer 区域，不能作为天线输出。 |
+| `MIXIN` | 这是 mixer input，不经过 BPF，也不能输出 0.1 W。 |
+| `CLK0` / `CLK1` | 已用于 quadrature mixer LO，占用后 RX 不工作。 |
+| SMA 直接并联 PA output | RX input 和 PA output 会互相加载，TX 时可能损坏 receiver。 |
+| 另加独立 BPF | 不满足“发射器应与接收器共用 bandpass filter”的要求。 |
+
+### 1A.5 必须复核的 R20 / R21
+
+图中 BPF 两端有两个关键 50 ohm 电阻：
+
+- `R20 = 50 ohm`，在 `BPFIN` 进入 BPF 的位置。
+- `R21 = 50 ohm`，在 `BPFOUT` 端附近。
+
+这两个元件在接收机里可能用于滤波器匹配/终端，但在 100 mW TX 路径里会影响功率。
+
+你必须做以下判断：
+
+1. 在 TX 模式，`R21` 是否会变成 PA output 的额外 50 ohm shunt load？
+2. 在 TX 模式，`R20` 是否会成为 SMA 前的 50 ohm series loss？
+3. 如果保留 R20/R21，PA 需要输出多少功率才能保证 SMA 外接 50 ohm load 上得到 0.1 W？
+4. 如果 R21 会明显吃掉 TX 功率，是否应把 R21 改成：
+   - DNP footprint；
+   - 只在 RX 模式接入的 switchable termination；
+   - 或移到 T/R switch 的 RX throw 后面。
+5. 如果 R20 造成明显插损，是否应改成：
+   - 0 ohm / small matching resistor；
+   - RF-rated resistor；
+   - 或重新计算 BPF matching。
+
+报告中不要只写“使用原 BPF”。必须写清楚 R20/R21 对 TX 输出功率的影响，并说明最终是保留、改值、DNP，还是切换接入。
+
+### 1A.6 精确的 T/R switch 定义
+
+建议把 T/R switch 放在 `BPFOUT` 与 `RFIN/C2` 之间。
+
+推荐网络命名：
+
+```text
+BPFOUT_SHARED      BPF 的 BPFOUT 端
+RX_RFIN_SWITCHED   接回 C2/U1 的 RX input
+TX_PA_FILTERED     PA output/matching 后的 TX 信号
+TR_CTRL            GPIO 控制信号
+PA_EN              PA 使能信号
+```
+
+逻辑关系：
+
+| `TR_CTRL` | `PA_EN` | 模式 | Switch 状态 | RF path |
+|---|---|---|---|---|
+| 0 | 0 | RX | `BPFOUT_SHARED -> RX_RFIN_SWITCHED` | SMA -> BPFIN -> BPF -> U1/U3 |
+| 1 | 1 | TX | `TX_PA_FILTERED -> BPFOUT_SHARED` | CLK2 -> PA -> BPF reverse -> SMA |
+
+默认安全状态应为 RX：
+
+- 上电时 `TR_CTRL = 0`。
+- 上电时 `PA_EN = 0`。
+- 软件只有在准备 TX 时才拉高 `TR_CTRL` 和 `PA_EN`。
+
+### 1A.7 你在 KiCad 中要做的精确修改
+
+在 `wspr_transceiver.kicad_sch` 中按这个顺序改：
+
+1. 保留 `U6 -> BPFIN -> BPF -> BPFOUT`。
+2. 断开 `BPFOUT/RFIN` 直接进入 `C2/U1` 的连接。
+3. 在断开点加入 RF SPDT / PIN diode switch。
+4. RX throw 连接到原 `RFIN -> C2 -> U1`。
+5. TX throw 连接到 `TX_PA_FILTERED`。
+6. `TX_PA_FILTERED` 来自：
+
+```text
+CLK2 -> DC block -> attenuator -> driver -> PA final -> matching/LPF
+```
+
+7. 增加 `PA_EN` 控制 PA 偏置或供电。
+8. 增加 `TR_CTRL` 控制 T/R switch。
+9. 在这些点加 test points：
+
+```text
+TP_CLK2_TX
+TP_TX_PA_IN
+TP_TX_PA_OUT
+TP_TX_FILTERED
+TP_BPFOUT_SHARED
+TP_TR_CTRL
+TP_PA_EN
+TP_ANT_50R
+```
+
+### 1A.8 需要量出来或算出来的数据
+
+根据 `BBBSchematic.jpg`，你需要为硬件报告准备这些数据：
+
+| 数据 | 测量/计算位置 | 目的 |
+|---|---|---|
+| BPF passband loss | `BPFIN` 到 `BPFOUT` | 判断 TX 反向通过 BPF 后还剩多少功率。 |
+| R20/R21 power dissipation | BPF 两端 50 ohm 元件 | 确认 0805 resistor 不过热且不吞掉太多功率。 |
+| PA output before BPF | `TX_PA_OUT` 或 `TX_FILTERED` | 确认 PA 本身能达到目标。 |
+| Final output power | SMA 外接 50 ohm load | 证明符合 `0.1 W into 50 ohms`。 |
+| RX isolation during TX | `RFIN/C2` 处 | 确认 TX 不会打进 U1。 |
+| RX path insertion loss | RX mode 下 SMA 到 `RFIN` | 确认新增 switch 没明显损坏接收性能。 |
+
+最终验收时以 SMA 外接 50 ohm dummy load 上的功率为准：
+
+```text
+0.1 W into 50 ohms = 2.236 Vrms = 6.324 Vpp sine-equivalent
+```
+
 ## 2. 第二步：建立新的 KiCad 工程副本
 
 不要直接破坏原始 `bbb` 工程。复制出新工程：
@@ -462,4 +661,3 @@ git commit -m "Add PCB screenshots for report"
 6. PCB 保持原尺寸，并放置/连接所有新增模块。
 7. ERC/DRC 记录。
 8. Part A RF loopback 修改图和照片。
-
