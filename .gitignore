@@ -1,0 +1,11 @@
+# Local/editor noise
+.DS_Store
+Thumbs.db
+
+# KiCad/local temporary cache files
+*.tmp
+fp-info-cache
+
+# Downloaded manufacturer invoice webpage assets
+**/Invoice_files/
+**/Invoice.html
