@@ -527,7 +527,122 @@ Attenuation   ~= -40 dB
 
 每次只减少一级衰减，并观察 receiver 是否出现饱和、削顶、audio distortion 或 decoder 失败。
 
-### 6.4 推荐测量点和判断标准
+### 6.4 已验证参考输入：30 mVpp
+
+之前实验中接收机使用过的参考 RF 输入为：
+
+```text
+report_images/partA_30mVpp_reference_input.jpg
+
+Function generator:
+frequency = 7.007 MHz
+amplitude = 30.000 mVpp
+offset    = 0 V
+load mode = High-Z
+waveform  = sine
+```
+
+把这个值作为 Part A RF loopback 的首选目标注入电平：
+
+```text
+Target receiver injection level ~= 30 mVpp
+```
+
+注意 `High-Z` 设置的含义：函数发生器屏幕上的 `30 mVpp` 是按高阻负载显示的。如果把函数发生器直接接到 50 ohm termination，实际电压可能约减半。Part A loopback 中应以示波器在 `RFIN_TP7` 或 `BPFIN` 处实际测到的 Vpp 为准。
+
+### 6.5 从 Si5351/CLK2 反推所需衰减
+
+示波器测得未衰减 Si5351 clock 约：
+
+```text
+CLK Vpp ~= 4.3 Vpp
+```
+
+目标接收机输入：
+
+```text
+Vtarget = 30 mVpp = 0.030 Vpp
+```
+
+所需电压比例：
+
+```text
+ratio = Vtarget / Vclk
+      = 0.030 / 4.3
+      ~= 0.00698
+      ~= 1 / 143
+```
+
+换算为 dB：
+
+```text
+attenuation_dB = 20 * log10(0.00698)
+               ~= -43.1 dB
+```
+
+所以从 `CLK2` 到 receiver input 需要约 `43 dB` 的电压衰减，才能把几伏方波压到约 `30 mVpp`。
+
+如果按 50 ohm 等效输入计算 `30 mVpp` 对应功率：
+
+```text
+Vrms = Vpp / (2 * sqrt(2))
+     = 0.030 / 2.828
+     ~= 10.6 mVrms
+
+P50 = Vrms^2 / 50
+    ~= 2.25 uW
+    ~= -26.5 dBm
+```
+
+这个电平仍然比真实空中 WSPR 弱信号大很多，但作为硬线 loopback/debug 输入是合理的起点，因为你们已经用函数发生器验证过接收链可处理 `30 mVpp`。
+
+### 6.6 用电阻实现 30 mVpp 目标
+
+使用一个隔直电容、一个串联电阻和一个明确的 shunt resistor，可以让输入电平可预测：
+
+```text
+CLK2
+ -> 100 pF to 1 nF DC blocking capacitor
+ -> Rs
+ -> injection point: RFIN_TP7 or BPFIN
+        |
+       Rsh
+        |
+       GND
+```
+
+公式：
+
+```text
+Vout = Vin * Rsh / (Rs + Rsh)
+
+Rs = Rsh * (Vin / Vout - 1)
+```
+
+若 `Vin = 4.3 Vpp`、`Vout = 30 mVpp`：
+
+| Shunt resistor `Rsh` | Calculated `Rs` | Practical choice | Expected Vout |
+|---:|---:|---:|---:|
+| 50 ohm | 7.1 kΩ | 6.8 kΩ | about 31 mVpp |
+| 50 ohm | 7.1 kΩ | 7.5 kΩ | about 28 mVpp |
+| 100 ohm | 14.2 kΩ | 15 kΩ | about 28 mVpp |
+| 235 ohm approximate receiver load | 33.4 kΩ | 33 kΩ | about 30 mVpp |
+
+推荐实际起步：
+
+```text
+CLK2 -> 1 nF -> 6.8 kΩ -> RFIN_TP7
+                         |
+                        50 Ω
+                         |
+                        GND
+```
+
+这会把 `4.3 Vpp` 降到约 `31 mVpp`，非常接近之前实验的 `30 mVpp`。如果担心过载，先用 `10 kΩ + 50 Ω` 得到约 `21 mVpp`，确认接收链没有削顶后再换成 `6.8 kΩ`。
+
+若只用串联电阻、不加明确 shunt resistor，输出电平会依赖接收机输入阻抗。图中 `RFIN` 经 `C2` 后看到的偏置网络大约包含 `R1 || R3 = 470 Ω || 470 Ω ~= 235 Ω`，但实际还会受 BPF、测试点、探头和布线影响。因此报告里更推荐写明使用了外部 `50 Ω` 或 `100 Ω` shunt 来固定衰减比。
+
+### 6.7 推荐测量点和判断标准
 
 示波器测量时：
 
