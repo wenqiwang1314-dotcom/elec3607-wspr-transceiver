@@ -535,7 +535,7 @@ Attenuation   ~= -40 dB
 report_images/partA_30mVpp_reference_input.jpg
 
 Function generator:
-frequency = 7.007 MHz
+receiver frequency = 7.0386 MHz
 amplitude = 30.000 mVpp
 offset    = 0 V
 load mode = High-Z
