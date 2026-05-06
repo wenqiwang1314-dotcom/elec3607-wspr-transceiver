@@ -421,6 +421,141 @@ Si5351 CLK2
 - 有测量数据。
 - 能解释为什么不会过载 receiver input。
 
+### 6.1 接收机过载不是 5 V / 3.3 V 逻辑不匹配
+
+Part A 中说的 receiver overload，主要不是普通数字电路里的 `5 V -> 3.3 V` 逻辑电平不匹配，而是 **RF 输入幅度太大，超过接收机前端线性范围**。
+
+示波器证据见：
+
+```text
+report_images/partA_clk_overload_scope.jpg
+```
+
+该截图显示 Si5351 相关时钟输出约：
+
+```text
+Frequency ~= 6.993 MHz
+CH1 Vpp ~= 4.28 V
+CH2 Vpp ~= 4.45 V
+Phase ~= 89 deg
+```
+
+这类信号是 CMOS 方波时钟，幅度是“几伏 Vpp”等级；而 receiver RF input 期望的是弱 RF 信号，通常是 microvolt 到 millivolt 等级。把几伏方波直接接到 `RFIN` 或 `BPFIN`，会让后级饱和：
+
+```text
+RFIN / C2
+ -> U1 THS4304 RF amplifier saturates
+ -> RFOUT clips or becomes nonlinear
+ -> U3 TS3A5017 mixer is overdriven
+ -> I/Q audio distortion
+ -> WSPR decoder cannot decode reliably
+```
+
+如果把 `4.3 Vpp` 粗略按正弦等效估算：
+
+```text
+Vrms = Vpp / (2 * sqrt(2))
+     = 4.3 / 2.828
+     ~= 1.52 Vrms
+
+P50 = Vrms^2 / 50
+    ~= 1.52^2 / 50
+    ~= 0.046 W
+    ~= +16.6 dBm
+```
+
+`+16.6 dBm` 对接收机输入来说非常强。WSPR receiver 的 RF input 应从很小电平开始测试；Part A loopback 只需要 decoder 能解码，不需要大功率。
+
+### 6.2 电压不匹配和 RF 过载的区别
+
+| 问题 | 发生位置 | 结果 | Part A 关注点 |
+|---|---|---|---|
+| 5 V / 3.3 V 逻辑不匹配 | 数字 GPIO / digital input | 可能损坏 3.3 V 逻辑输入 | 不要把 5 V digital signal 直接接 3.3 V pin。 |
+| RF receiver overload | `RFIN`, `BPFIN`, U1/U3 analog RF path | 放大器/mixer 饱和，解码失败，严重时可能损坏输入 | `CLK2` 必须先隔直和大幅衰减。 |
+
+本项目 Part A 的核心问题是第二类：`CLK2` 是 RF 方波源，但 receiver input 是敏感模拟 RF 输入。即使 `CLK2` 是 3.3 V CMOS，也仍然远大于接收机需要的 RF 电平。
+
+### 6.3 安全的 Part A 衰减起步值
+
+第一次 RF loopback 不要直接连接：
+
+```text
+CLK2 -> RFIN
+```
+
+推荐从大衰减开始：
+
+```text
+CLK2
+ -> 100 pF to 1 nF DC blocking capacitor
+ -> 10 kΩ series resistor
+ -> injection point: RFIN_TP7 or BPFIN
+        |
+       50 Ω or 100 Ω
+        |
+       GND
+```
+
+若使用 `10 kΩ + 50 Ω` 分压：
+
+```text
+Voltage ratio = 50 / (10000 + 50)
+              ~= 0.005
+Attenuation   ~= -46 dB
+
+4.3 Vpp -> about 21 mVpp
+```
+
+若使用 `10 kΩ + 100 Ω` 分压：
+
+```text
+Voltage ratio = 100 / (10000 + 100)
+              ~= 0.0099
+Attenuation   ~= -40 dB
+
+4.3 Vpp -> about 43 mVpp
+```
+
+调试顺序：
+
+```text
+10 kΩ series first
+ -> if too weak, try 4.7 kΩ
+ -> then 2.2 kΩ
+ -> then 1 kΩ
+```
+
+每次只减少一级衰减，并观察 receiver 是否出现饱和、削顶、audio distortion 或 decoder 失败。
+
+### 6.4 推荐测量点和判断标准
+
+示波器测量时：
+
+- 优先使用 `10x probe`，减少探头对 RF 节点的负载。
+- 先测 `CLK2` 原始输出，再测衰减后的注入点。
+- 注入点可以先选 `RFIN_TP7`，成功后再换到 `BPFIN` 或 SMA，让信号经过 BPF。
+- 保持短地线或用短同轴，避免测到过多 ringing。
+
+记录表：
+
+| 测量点 | 记录内容 | 判断 |
+|---|---|---|
+| `CLK2` | frequency, Vpp, waveform | 证明 TX source 存在。 |
+| attenuator output | Vpp after attenuation | 确认不是几伏直接进 receiver。 |
+| `RFIN_TP7` | injected RF level | 先从 tens of mVpp 或更低开始。 |
+| `RFOUT_TP8` | U1 output waveform | 不应明显削顶/贴 rail。 |
+| audio I/Q output | Iout/Qout waveform | 不应严重削顶，decoder 应能看到 tone。 |
+
+报告写法：
+
+```text
+Receiver overload was avoided by treating the Si5351 CLK2 output as a large
+CMOS RF waveform, not as a small antenna-level signal. A DC blocking capacitor
+and resistive attenuator were inserted before RFIN/BPFIN. The unattenuated
+clock was about 4.3 Vpp at 6.993 MHz, so the first loopback tests used about
+40-46 dB attenuation before injecting the signal into the receiver input.
+```
+
 ## 7. 第七步：画 Part B 新原理图
 
 在 `wspr_transceiver.kicad_sch` 中新增或修改这些模块。
